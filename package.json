@@ -1,0 +1,16 @@
+{
+  "name": "trump-truth-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that polls Trump's Truth Social RSS feed every minute.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "run-once": "node src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.5.0",
+    "undici": "^7.16.0"
+  }
+}
