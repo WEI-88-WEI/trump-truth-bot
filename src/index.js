@@ -190,7 +190,7 @@ async function handleUpdates(latestPost) {
       chats.add(chatId);
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: '已订阅特朗普 Truth Social 更新。我会每分钟检查一次，只推原创帖，并附中文翻译。\n\n命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条\n/subscribers 查看订阅列表（管理员）\n/count 查看订阅人数（管理员）',
+        text: `✅ 订阅成功\n\n我会每分钟检查一次特朗普 Truth Social，只推原创帖，并附中文翻译。\n\n可用命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条\n/subscribers 查看订阅列表（管理员）\n/count 查看订阅人数（管理员）\n\n当前订阅人数：${chats.size}`,
       });
       if (!wasSubscribed) {
         await notifyAdmins(`📥 新用户订阅\nchat_id: ${chatId}\n当前订阅人数: ${chats.size}`);
@@ -199,7 +199,7 @@ async function handleUpdates(latestPost) {
       const wasSubscribed = chats.delete(chatId);
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: '已取消订阅。',
+        text: `✅ 已取消订阅\n\n之后不会再给你推送新帖。\n当前订阅人数：${chats.size}`,
       });
       if (wasSubscribed) {
         await notifyAdmins(`📤 用户取消订阅\nchat_id: ${chatId}\n当前订阅人数: ${chats.size}`);
