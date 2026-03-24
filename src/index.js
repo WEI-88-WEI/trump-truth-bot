@@ -15,6 +15,10 @@ const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_IDS || '6894522404')
   .map((id) => id.trim())
   .filter(Boolean)
   .map((id) => Number(id));
+const POLL_INTERVAL_SECONDS = Number(process.env.POLL_INTERVAL_SECONDS || 60);
+const TELEGRAM_LONG_POLL_SECONDS = Number(process.env.TELEGRAM_LONG_POLL_SECONDS || 50);
+const RUN_MODE = process.env.RUN_MODE || (process.argv.includes('--daemon') ? 'daemon' : 'once');
+
 const ROOT = path.resolve(process.cwd());
 const DATA_DIR = path.join(ROOT, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
@@ -46,11 +50,12 @@ function saveJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function escapeHtml(text = '') {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function stripHtml(html = '') {
@@ -76,7 +81,6 @@ function isOriginalPost(item) {
   if (/^RT\b/i.test(title)) return false;
   if (/^RT\b/i.test(text)) return false;
   if (/quote-inline/i.test(description)) return false;
-
   return true;
 }
 
@@ -108,9 +112,7 @@ async function telegram(method, body = {}) {
     body: JSON.stringify(body),
   });
   const json = await res.json();
-  if (!json.ok) {
-    throw new Error(`${method} failed: ${json.description}`);
-  }
+  if (!json.ok) throw new Error(`${method} failed: ${json.description}`);
   return json.result;
 }
 
@@ -122,20 +124,17 @@ async function translateToChinese(text) {
   url.searchParams.set('dt', 't');
   url.searchParams.set('q', text);
 
-  const res = await fetch(url, {
-    headers: { 'user-agent': 'trump-truth-bot/1.0' },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Translate request failed: ${res.status}`);
-  }
+  const res = await fetch(url, { headers: { 'user-agent': 'trump-truth-bot/1.0' } });
+  if (!res.ok) throw new Error(`Translate request failed: ${res.status}`);
 
   const data = await res.json();
   return Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || '').join('') : '';
 }
 
 function formatPost(post) {
-  const zh = post.translation ? ['🇨🇳 <b>中文翻译</b>', '', escapeHtml(post.translation), '', '🇺🇸 <b>原文</b>', ''] : [];
+  const zh = post.translation
+    ? ['🇨🇳 <b>中文翻译</b>', '', escapeHtml(post.translation), '', '🇺🇸 <b>原文</b>', '']
+    : [];
   return [
     '🇺🇸 <b>Trump Truth 更新</b>',
     '',
@@ -166,14 +165,51 @@ async function notifyAdmins(text) {
   }
 }
 
-async function handleUpdates(latestPost) {
+async function fetchLatestPosts() {
+  const res = await fetch(FEED_URL, { headers: { 'user-agent': 'trump-truth-bot/1.0' } });
+  if (!res.ok) throw new Error(`Feed request failed: ${res.status}`);
+
+  const xml = await res.text();
+  const parsed = parser.parse(xml);
+  return normalizeItems(parsed?.rss?.channel?.item || []);
+}
+
+async function getLatestPostWithTranslation() {
+  const posts = await fetchLatestPosts();
+  const latestPost = posts[posts.length - 1] || null;
+  if (!latestPost) return null;
+
+  return {
+    ...latestPost,
+    translation: await translateToChinese(latestPost.text).catch((error) => {
+      console.error('Translation failed:', error.message);
+      return '';
+    }),
+  };
+}
+
+async function sendLatest(chatId, latestPost) {
+  if (!latestPost) {
+    await telegram('sendMessage', { chat_id: chatId, text: '还没抓到最新帖子，稍后再试。' });
+    return;
+  }
+
+  await telegram('sendMessage', {
+    chat_id: chatId,
+    text: formatPost(latestPost),
+    parse_mode: 'HTML',
+    disable_web_page_preview: false,
+  });
+}
+
+async function processUpdates({ timeoutSeconds = 0, latestPost = null } = {}) {
   const updatesState = loadJson(UPDATES_FILE, { lastUpdateId: 0 });
   const subscribersState = loadJson(SUBSCRIBERS_FILE, { chats: [] });
   const chats = new Set(subscribersState.chats || []);
 
   const updates = await telegram('getUpdates', {
     offset: updatesState.lastUpdateId + 1,
-    timeout: 0,
+    timeout: timeoutSeconds,
     allowed_updates: ['message'],
   });
 
@@ -190,7 +226,7 @@ async function handleUpdates(latestPost) {
       chats.add(chatId);
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: `✅ 订阅成功\n\n我会每分钟检查一次特朗普 Truth Social，只推原创帖，并附中文翻译。\n\n可用命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条\n/subscribers 查看订阅列表（管理员）\n/count 查看订阅人数（管理员）\n\n当前订阅人数：${chats.size}`,
+        text: `✅ 订阅成功\n\n我会秒级响应命令，并持续检查特朗普 Truth Social，只推原创帖，并附中文翻译。\n\n可用命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条\n/subscribers 查看订阅列表（管理员）\n/count 查看订阅人数（管理员）\n\n当前订阅人数：${chats.size}`,
       });
       if (!wasSubscribed) {
         await notifyAdmins(`📥 新用户订阅\nchat_id: ${chatId}\n当前订阅人数: ${chats.size}`);
@@ -205,30 +241,18 @@ async function handleUpdates(latestPost) {
         await notifyAdmins(`📤 用户取消订阅\nchat_id: ${chatId}\n当前订阅人数: ${chats.size}`);
       }
     } else if (text.startsWith('/latest')) {
-      const latestWithTranslation = latestPost
-        ? {
-            ...latestPost,
-            translation: await translateToChinese(latestPost.text).catch(() => ''),
-          }
-        : null;
+      const latest = latestPost || loadJson(STATE_FILE, {}).latestPost || (await getLatestPostWithTranslation());
+      await sendLatest(chatId, latest);
+    } else if (text.startsWith('/count')) {
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: latestWithTranslation ? formatPost(latestWithTranslation) : '还没抓到最新帖子，稍后再试。',
-        parse_mode: 'HTML',
-        disable_web_page_preview: false,
+        text: isAdmin(chatId) ? `当前订阅人数：${chats.size}` : '这个命令仅管理员可用。',
       });
-    } else if (text.startsWith('/count')) {
-      if (!isAdmin(chatId)) {
-        await telegram('sendMessage', { chat_id: chatId, text: '这个命令仅管理员可用。' });
-      } else {
-        await telegram('sendMessage', { chat_id: chatId, text: `当前订阅人数：${chats.size}` });
-      }
     } else if (text.startsWith('/subscribers')) {
-      if (!isAdmin(chatId)) {
-        await telegram('sendMessage', { chat_id: chatId, text: '这个命令仅管理员可用。' });
-      } else {
-        await telegram('sendMessage', { chat_id: chatId, text: formatSubscriberList([...chats]) });
-      }
+      await telegram('sendMessage', {
+        chat_id: chatId,
+        text: isAdmin(chatId) ? formatSubscriberList([...chats]) : '这个命令仅管理员可用。',
+      });
     }
   }
 
@@ -238,76 +262,84 @@ async function handleUpdates(latestPost) {
   return subscribersState.chats;
 }
 
-async function fetchLatestPosts() {
-  const res = await fetch(FEED_URL, {
-    headers: { 'user-agent': 'trump-truth-bot/1.0' },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Feed request failed: ${res.status}`);
-  }
-
-  const xml = await res.text();
-  const parsed = parser.parse(xml);
-  return normalizeItems(parsed?.rss?.channel?.item || []);
-}
-
-async function main() {
+async function checkForNewPost() {
   const state = loadJson(STATE_FILE, { lastSeenId: null, lastCheckedAt: null, latestPost: null });
-  const posts = await fetchLatestPosts();
-  const latestPost = posts[posts.length - 1] || null;
-
-  const subscribers = await handleUpdates(latestPost);
+  const latestPost = await getLatestPostWithTranslation();
 
   if (!latestPost) {
     state.lastCheckedAt = new Date().toISOString();
     saveJson(STATE_FILE, state);
-    console.log('No posts found.');
-    return;
+    return null;
   }
 
-  const latestWithTranslation = {
-    ...latestPost,
-    translation: await translateToChinese(latestPost.text).catch((error) => {
-      console.error('Translation failed:', error.message);
-      return '';
-    }),
-  };
-
-  state.latestPost = latestWithTranslation;
-
-  const isNew = state.lastSeenId && state.lastSeenId !== latestPost.id;
+  state.latestPost = latestPost;
 
   if (!state.lastSeenId) {
     state.lastSeenId = latestPost.id;
     state.lastCheckedAt = new Date().toISOString();
     saveJson(STATE_FILE, state);
     console.log('Initialized with latest post:', latestPost.id);
-    return;
+    return latestPost;
   }
 
-  if (isNew) {
+  if (state.lastSeenId !== latestPost.id) {
+    const subscribers = loadJson(SUBSCRIBERS_FILE, { chats: [] }).chats || [];
     for (const chatId of subscribers) {
       try {
-        await telegram('sendMessage', {
-          chat_id: chatId,
-          text: formatPost(latestWithTranslation),
-          parse_mode: 'HTML',
-          disable_web_page_preview: false,
-        });
+        await sendLatest(chatId, latestPost);
       } catch (error) {
         console.error(`Failed to send message to ${chatId}:`, error.message);
       }
     }
     state.lastSeenId = latestPost.id;
+    console.log(`Sent new post ${latestPost.id} to ${subscribers.length} chats.`);
+  } else {
+    console.log('No new post.');
   }
 
   state.lastCheckedAt = new Date().toISOString();
   saveJson(STATE_FILE, state);
-  console.log(isNew ? `Sent new post ${latestPost.id} to ${subscribers.length} chats.` : 'No new post.');
+  return latestPost;
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+async function runOnce() {
+  const latestPost = await getLatestPostWithTranslation().catch((error) => {
+    console.error('Prefetch latest post failed:', error.message);
+    return loadJson(STATE_FILE, {}).latestPost || null;
+  });
+  await processUpdates({ timeoutSeconds: 0, latestPost });
+  await checkForNewPost();
+}
+
+async function runDaemon() {
+  console.log(`Starting daemon mode. command latency: seconds; feed check interval: ${POLL_INTERVAL_SECONDS}s`);
+
+  let nextFeedCheckAt = 0;
+  while (true) {
+    try {
+      const now = Date.now();
+      if (now >= nextFeedCheckAt) {
+        await checkForNewPost();
+        nextFeedCheckAt = now + POLL_INTERVAL_SECONDS * 1000;
+      }
+
+      const latestPost = loadJson(STATE_FILE, {}).latestPost || null;
+      await processUpdates({ timeoutSeconds: TELEGRAM_LONG_POLL_SECONDS, latestPost });
+    } catch (error) {
+      console.error('Daemon loop error:', error);
+      await sleep(3000);
+    }
+  }
+}
+
+if (RUN_MODE === 'daemon') {
+  runDaemon().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+} else {
+  runOnce().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}

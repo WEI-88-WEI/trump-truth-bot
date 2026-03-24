@@ -4,7 +4,8 @@
 
 ## 功能
 
-- 每分钟抓取 `https://www.trumpstruth.org/feed`
+- 常驻长轮询，Telegram 命令秒级响应
+- 持续检查 `https://www.trumpstruth.org/feed`，默认每分钟一次
 - 只推送原创帖，自动过滤转发 / 无标题分享帖
 - 自动附带中文翻译
 - 支持 Telegram 命令：
@@ -15,7 +16,6 @@
   - `/subscribers` 查看订阅列表（管理员）
 - 新用户订阅 / 取消订阅时，管理员会收到提醒
 - 本地 JSON 状态存储，避免重复推送
-- 适合用 `cron` 每分钟运行一次
 
 ## 环境变量
 
@@ -28,15 +28,24 @@ FEED_URL=https://www.trumpstruth.org/feed
 
 ## 本地运行
 
+单次执行：
+
 ```bash
 npm install
 npm run run-once
 ```
 
-## 配置每分钟运行
+常驻运行：
 
 ```bash
-* * * * * cd /path/to/trump-truth-bot && /usr/bin/env bash -lc 'npm run run-once >> cron.log 2>&1'
+npm install
+npm start
+```
+
+也可以直接运行：
+
+```bash
+./run-bot.sh
 ```
 
 ## 已配置的机器人
