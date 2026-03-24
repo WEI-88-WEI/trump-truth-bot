@@ -10,6 +10,11 @@ setGlobalDispatcher(new Agent({ connect: { family: 4 } }));
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const FEED_URL = process.env.FEED_URL || 'https://www.trumpstruth.org/feed';
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_IDS || '6894522404')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean)
+  .map((id) => Number(id));
 const ROOT = path.resolve(process.cwd());
 const DATA_DIR = path.join(ROOT, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
@@ -142,6 +147,25 @@ function formatPost(post) {
   ].join('\n');
 }
 
+function isAdmin(chatId) {
+  return ADMIN_CHAT_IDS.includes(Number(chatId));
+}
+
+function formatSubscriberList(chats) {
+  if (!chats.length) return '当前没有订阅用户。';
+  return ['当前订阅用户：', ...chats.map((id, index) => `${index + 1}. ${id}`)].join('\n');
+}
+
+async function notifyAdmins(text) {
+  for (const chatId of ADMIN_CHAT_IDS) {
+    try {
+      await telegram('sendMessage', { chat_id: chatId, text });
+    } catch (error) {
+      console.error(`Failed to notify admin ${chatId}:`, error.message);
+    }
+  }
+}
+
 async function handleUpdates(latestPost) {
   const updatesState = loadJson(UPDATES_FILE, { lastUpdateId: 0 });
   const subscribersState = loadJson(SUBSCRIBERS_FILE, { chats: [] });
@@ -162,17 +186,24 @@ async function handleUpdates(latestPost) {
     const text = message.text.trim();
 
     if (text.startsWith('/start')) {
+      const wasSubscribed = chats.has(chatId);
       chats.add(chatId);
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: '已订阅特朗普 Truth Social 更新。我会每分钟检查一次，只推原创帖，并附中文翻译。\n\n命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条',
+        text: '已订阅特朗普 Truth Social 更新。我会每分钟检查一次，只推原创帖，并附中文翻译。\n\n命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条\n/subscribers 查看订阅列表（管理员）\n/count 查看订阅人数（管理员）',
       });
+      if (!wasSubscribed) {
+        await notifyAdmins(`📥 新用户订阅\nchat_id: ${chatId}\n当前订阅人数: ${chats.size}`);
+      }
     } else if (text.startsWith('/stop')) {
-      chats.delete(chatId);
+      const wasSubscribed = chats.delete(chatId);
       await telegram('sendMessage', {
         chat_id: chatId,
         text: '已取消订阅。',
       });
+      if (wasSubscribed) {
+        await notifyAdmins(`📤 用户取消订阅\nchat_id: ${chatId}\n当前订阅人数: ${chats.size}`);
+      }
     } else if (text.startsWith('/latest')) {
       const latestWithTranslation = latestPost
         ? {
@@ -186,6 +217,18 @@ async function handleUpdates(latestPost) {
         parse_mode: 'HTML',
         disable_web_page_preview: false,
       });
+    } else if (text.startsWith('/count')) {
+      if (!isAdmin(chatId)) {
+        await telegram('sendMessage', { chat_id: chatId, text: '这个命令仅管理员可用。' });
+      } else {
+        await telegram('sendMessage', { chat_id: chatId, text: `当前订阅人数：${chats.size}` });
+      }
+    } else if (text.startsWith('/subscribers')) {
+      if (!isAdmin(chatId)) {
+        await telegram('sendMessage', { chat_id: chatId, text: '这个命令仅管理员可用。' });
+      } else {
+        await telegram('sendMessage', { chat_id: chatId, text: formatSubscriberList([...chats]) });
+      }
     }
   }
 
