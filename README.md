@@ -48,6 +48,21 @@ npm start
 ./run-bot.sh
 ```
 
+## 首次启动会生成的文件
+
+程序运行后会自动在 `data/` 下生成或更新这些文件：
+
+- `state.json`：最新帖子、上次检查时间、最近一次已推送 ID
+- `subscribers.json`：订阅用户列表
+- `updates.json`：Telegram update offset
+- `daemon.log`：常驻运行日志
+
+仓库里提供了这些模板文件，方便看结构：
+
+- `data/state.example.json`
+- `data/subscribers.example.json`
+- `data/updates.example.json`
+
 ## 已配置的机器人
 
 - Bot 名称：`川普说`
