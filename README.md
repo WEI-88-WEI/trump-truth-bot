@@ -5,6 +5,8 @@
 ## 功能
 
 - 每分钟抓取 `https://www.trumpstruth.org/feed`
+- 只推送原创帖，自动过滤转发 / 无标题分享帖
+- 自动附带中文翻译
 - 支持 Telegram 命令：
   - `/start` 开始订阅
   - `/stop` 取消订阅

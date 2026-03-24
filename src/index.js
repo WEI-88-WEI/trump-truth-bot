@@ -61,9 +61,24 @@ function stripHtml(html = '') {
     .trim();
 }
 
+function isOriginalPost(item) {
+  const title = (item.title || '').trim();
+  const description = item.description || '';
+  const text = stripHtml(description || title);
+
+  if (!text) return false;
+  if (/^\[No Title\]/i.test(title)) return false;
+  if (/^RT\b/i.test(title)) return false;
+  if (/^RT\b/i.test(text)) return false;
+  if (/quote-inline/i.test(description)) return false;
+
+  return true;
+}
+
 function normalizeItems(rawItems) {
   const items = Array.isArray(rawItems) ? rawItems : rawItems ? [rawItems] : [];
   return items
+    .filter(isOriginalPost)
     .map((item) => {
       const link = item.link || item.guid;
       const text = stripHtml(item.description || item.title || '');
@@ -94,10 +109,32 @@ async function telegram(method, body = {}) {
   return json.result;
 }
 
+async function translateToChinese(text) {
+  const url = new URL('https://translate.googleapis.com/translate_a/single');
+  url.searchParams.set('client', 'gtx');
+  url.searchParams.set('sl', 'auto');
+  url.searchParams.set('tl', 'zh-CN');
+  url.searchParams.set('dt', 't');
+  url.searchParams.set('q', text);
+
+  const res = await fetch(url, {
+    headers: { 'user-agent': 'trump-truth-bot/1.0' },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Translate request failed: ${res.status}`);
+  }
+
+  const data = await res.json();
+  return Array.isArray(data?.[0]) ? data[0].map((part) => part?.[0] || '').join('') : '';
+}
+
 function formatPost(post) {
+  const zh = post.translation ? ['🇨🇳 <b>中文翻译</b>', '', escapeHtml(post.translation), '', '🇺🇸 <b>原文</b>', ''] : [];
   return [
     '🇺🇸 <b>Trump Truth 更新</b>',
     '',
+    ...zh,
     escapeHtml(post.text),
     '',
     `🕒 ${escapeHtml(post.pubDate)}`,
@@ -128,7 +165,7 @@ async function handleUpdates(latestPost) {
       chats.add(chatId);
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: '已订阅特朗普 Truth Social 更新。我会每分钟检查一次，有新帖就推送给你。\n\n命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条',
+        text: '已订阅特朗普 Truth Social 更新。我会每分钟检查一次，只推原创帖，并附中文翻译。\n\n命令：\n/start 订阅\n/stop 取消订阅\n/latest 查看最新一条',
       });
     } else if (text.startsWith('/stop')) {
       chats.delete(chatId);
@@ -137,9 +174,17 @@ async function handleUpdates(latestPost) {
         text: '已取消订阅。',
       });
     } else if (text.startsWith('/latest')) {
+      const latestWithTranslation = latestPost
+        ? {
+            ...latestPost,
+            translation: await translateToChinese(latestPost.text).catch(() => ''),
+          }
+        : null;
       await telegram('sendMessage', {
         chat_id: chatId,
-        text: latestPost ? stripHtml(formatPost(latestPost)) : '还没抓到最新帖子，稍后再试。',
+        text: latestWithTranslation ? formatPost(latestWithTranslation) : '还没抓到最新帖子，稍后再试。',
+        parse_mode: 'HTML',
+        disable_web_page_preview: false,
       });
     }
   }
@@ -178,7 +223,15 @@ async function main() {
     return;
   }
 
-  state.latestPost = latestPost;
+  const latestWithTranslation = {
+    ...latestPost,
+    translation: await translateToChinese(latestPost.text).catch((error) => {
+      console.error('Translation failed:', error.message);
+      return '';
+    }),
+  };
+
+  state.latestPost = latestWithTranslation;
 
   const isNew = state.lastSeenId && state.lastSeenId !== latestPost.id;
 
@@ -195,7 +248,7 @@ async function main() {
       try {
         await telegram('sendMessage', {
           chat_id: chatId,
-          text: formatPost(latestPost),
+          text: formatPost(latestWithTranslation),
           parse_mode: 'HTML',
           disable_web_page_preview: false,
         });
