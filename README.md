@@ -24,7 +24,24 @@
 ```bash
 BOT_TOKEN=你的 Telegram Bot Token
 FEED_URL=https://www.trumpstruth.org/feed
+ADMIN_CHAT_IDS=你的 Telegram chat id，多个用逗号分隔
+POLL_INTERVAL_SECONDS=60
+TELEGRAM_LONG_POLL_SECONDS=50
 ```
+
+## 一键初始化
+
+首次部署可以直接运行：
+
+```bash
+chmod +x init.sh
+./init.sh
+```
+
+它会自动：
+- 创建 `.env`（如果还没有）
+- 初始化 `data/*.json` 状态文件
+- 安装依赖
 
 ## 本地运行
 
@@ -62,6 +79,22 @@ npm start
 - `data/state.example.json`
 - `data/subscribers.example.json`
 - `data/updates.example.json`
+
+## systemd 部署示例
+
+仓库内提供：
+
+- `trump-truth-bot.service.example`
+
+使用方法：
+
+```bash
+cp trump-truth-bot.service.example /etc/systemd/system/trump-truth-bot.service
+# 把里面的 /path/to/trump-truth-bot 改成你的实际路径
+sudo systemctl daemon-reload
+sudo systemctl enable --now trump-truth-bot
+sudo systemctl status trump-truth-bot
+```
 
 ## 已配置的机器人
 
