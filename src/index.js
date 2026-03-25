@@ -174,18 +174,23 @@ async function fetchLatestPosts() {
   return normalizeItems(parsed?.rss?.channel?.item || []);
 }
 
+async function enrichPostWithTranslation(post) {
+  if (!post) return null;
+  return {
+    ...post,
+    translation: await translateToChinese(post.text).catch((error) => {
+      console.error('Translation failed:', error.message);
+      return '';
+    }),
+  };
+}
+
 async function getLatestPostWithTranslation() {
   const posts = await fetchLatestPosts();
   const latestPost = posts[posts.length - 1] || null;
   if (!latestPost) return null;
 
-  return {
-    ...latestPost,
-    translation: await translateToChinese(latestPost.text).catch((error) => {
-      console.error('Translation failed:', error.message);
-      return '';
-    }),
-  };
+  return enrichPostWithTranslation(latestPost);
 }
 
 async function sendLatest(chatId, latestPost) {
@@ -264,7 +269,8 @@ async function processUpdates({ timeoutSeconds = 0, latestPost = null } = {}) {
 
 async function checkForNewPost() {
   const state = loadJson(STATE_FILE, { lastSeenId: null, lastCheckedAt: null, latestPost: null });
-  const latestPost = await getLatestPostWithTranslation();
+  const posts = await fetchLatestPosts();
+  const latestPost = posts[posts.length - 1] || null;
 
   if (!latestPost) {
     state.lastCheckedAt = new Date().toISOString();
@@ -272,34 +278,52 @@ async function checkForNewPost() {
     return null;
   }
 
-  state.latestPost = latestPost;
+  const subscribers = loadJson(SUBSCRIBERS_FILE, { chats: [] }).chats || [];
 
   if (!state.lastSeenId) {
+    const latestPostWithTranslation = await enrichPostWithTranslation(latestPost);
     state.lastSeenId = latestPost.id;
+    state.latestPost = latestPostWithTranslation;
     state.lastCheckedAt = new Date().toISOString();
     saveJson(STATE_FILE, state);
     console.log('Initialized with latest post:', latestPost.id);
-    return latestPost;
+    return latestPostWithTranslation;
   }
 
-  if (state.lastSeenId !== latestPost.id) {
-    const subscribers = loadJson(SUBSCRIBERS_FILE, { chats: [] }).chats || [];
+  const lastSeenIndex = posts.findIndex((post) => post.id === state.lastSeenId);
+  const newPosts = lastSeenIndex >= 0 ? posts.slice(lastSeenIndex + 1) : posts;
+
+  if (!newPosts.length) {
+    if (!state.latestPost || state.latestPost.id !== latestPost.id) {
+      state.latestPost = await enrichPostWithTranslation(latestPost);
+    }
+    state.lastCheckedAt = new Date().toISOString();
+    saveJson(STATE_FILE, state);
+    console.log('No new post.');
+    return state.latestPost;
+  }
+
+  let latestTranslatedPost = state.latestPost;
+  for (const post of newPosts) {
+    const postWithTranslation = await enrichPostWithTranslation(post);
+    latestTranslatedPost = postWithTranslation;
+
     for (const chatId of subscribers) {
       try {
-        await sendLatest(chatId, latestPost);
+        await sendLatest(chatId, postWithTranslation);
       } catch (error) {
         console.error(`Failed to send message to ${chatId}:`, error.message);
       }
     }
-    state.lastSeenId = latestPost.id;
-    console.log(`Sent new post ${latestPost.id} to ${subscribers.length} chats.`);
-  } else {
-    console.log('No new post.');
+
+    console.log(`Sent new post ${post.id} to ${subscribers.length} chats.`);
   }
 
+  state.lastSeenId = latestPost.id;
+  state.latestPost = latestTranslatedPost;
   state.lastCheckedAt = new Date().toISOString();
   saveJson(STATE_FILE, state);
-  return latestPost;
+  return latestTranslatedPost;
 }
 
 async function runOnce() {
