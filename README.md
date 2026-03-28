@@ -85,13 +85,13 @@ npm start
 
 仓库内提供：
 
+- `deploy/trump-truth-bot.service`
 - `trump-truth-bot.service.example`
 
 使用方法：
 
 ```bash
-cp trump-truth-bot.service.example /etc/systemd/system/trump-truth-bot.service
-# 把里面的 /path/to/trump-truth-bot 改成你的实际路径
+cp deploy/trump-truth-bot.service /etc/systemd/system/trump-truth-bot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now trump-truth-bot
 sudo systemctl status trump-truth-bot

@@ -1,0 +1,17 @@
+[Unit]
+Description=Trump Truth Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/.openclaw/workspace/trump-truth-bot
+Environment=NODE_ENV=production
+Environment=RUN_MODE=daemon
+ExecStart=/home/ubuntu/nvm/versions/node/v24.14.0/bin/node /home/ubuntu/.openclaw/workspace/trump-truth-bot/src/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
