@@ -87,6 +87,9 @@ npm start
 
 - `deploy/trump-truth-bot.service`
 - `trump-truth-bot.service.example`
+- `systemd.trump-truth-bot.service`
+
+当前服务器已经使用 systemd 托管该服务。
 
 使用方法：
 
