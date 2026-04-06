@@ -24,6 +24,7 @@ const DATA_DIR = path.join(ROOT, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const SUBSCRIBERS_FILE = path.join(DATA_DIR, 'subscribers.json');
 const UPDATES_FILE = path.join(DATA_DIR, 'updates.json');
+const DELIVERY_FILE = path.join(DATA_DIR, 'delivery.json');
 
 if (!BOT_TOKEN) {
   console.error('Missing BOT_TOKEN in environment.');
@@ -153,6 +154,88 @@ function isAdmin(chatId) {
 function formatSubscriberList(chats) {
   if (!chats.length) return '当前没有订阅用户。';
   return ['当前订阅用户：', ...chats.map((id, index) => `${index + 1}. ${id}`)].join('\n');
+}
+
+function loadDeliveryState() {
+  return loadJson(DELIVERY_FILE, { posts: {} });
+}
+
+function saveDeliveryState(state) {
+  saveJson(DELIVERY_FILE, state);
+}
+
+function getDeliveredChatsForPost(deliveryState, postId) {
+  return new Set(deliveryState?.posts?.[postId]?.deliveredChats || []);
+}
+
+function markChatDelivered(deliveryState, post, chatId) {
+  if (!deliveryState.posts) deliveryState.posts = {};
+  if (!deliveryState.posts[post.id]) {
+    deliveryState.posts[post.id] = {
+      link: post.link,
+      pubDate: post.pubDate,
+      deliveredChats: [],
+      completed: false,
+      lastAttemptAt: null,
+      completedAt: null,
+    };
+  }
+
+  const delivered = new Set(deliveryState.posts[post.id].deliveredChats || []);
+  delivered.add(Number(chatId));
+  deliveryState.posts[post.id].deliveredChats = [...delivered];
+  deliveryState.posts[post.id].lastAttemptAt = new Date().toISOString();
+}
+
+function markDeliveryAttempt(deliveryState, post) {
+  if (!deliveryState.posts) deliveryState.posts = {};
+  if (!deliveryState.posts[post.id]) {
+    deliveryState.posts[post.id] = {
+      link: post.link,
+      pubDate: post.pubDate,
+      deliveredChats: [],
+      completed: false,
+      lastAttemptAt: null,
+      completedAt: null,
+    };
+  }
+  deliveryState.posts[post.id].lastAttemptAt = new Date().toISOString();
+}
+
+function finalizeDeliveryIfComplete(deliveryState, post, subscribers) {
+  const delivered = getDeliveredChatsForPost(deliveryState, post.id);
+  const allDelivered = subscribers.every((chatId) => delivered.has(Number(chatId)));
+  if (!deliveryState.posts?.[post.id]) return allDelivered;
+
+  deliveryState.posts[post.id].completed = allDelivered;
+  deliveryState.posts[post.id].completedAt = allDelivered ? new Date().toISOString() : null;
+  return allDelivered;
+}
+
+async function deliverPostToSubscribers(post, subscribers) {
+  const deliveryState = loadDeliveryState();
+  const deliveredBefore = getDeliveredChatsForPost(deliveryState, post.id);
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const chatId of subscribers) {
+    if (deliveredBefore.has(Number(chatId))) continue;
+
+    markDeliveryAttempt(deliveryState, post);
+    try {
+      await sendLatest(chatId, post);
+      markChatDelivered(deliveryState, post, chatId);
+      saveDeliveryState(deliveryState);
+      successCount += 1;
+    } catch (error) {
+      failureCount += 1;
+      console.error(`Failed to send message to ${chatId}:`, error.message);
+    }
+  }
+
+  const complete = finalizeDeliveryIfComplete(deliveryState, post, subscribers);
+  saveDeliveryState(deliveryState);
+  return { successCount, failureCount, complete, deliveredCount: getDeliveredChatsForPost(deliveryState, post.id).size };
 }
 
 async function notifyAdmins(text) {
@@ -297,9 +380,22 @@ async function checkForNewPost() {
     if (!state.latestPost || state.latestPost.id !== latestPost.id) {
       state.latestPost = await enrichPostWithTranslation(latestPost);
     }
+
+    if (state.latestPost) {
+      const delivery = await deliverPostToSubscribers(state.latestPost, subscribers);
+      if (delivery.successCount || delivery.failureCount) {
+        console.log(
+          `Retried latest post ${state.latestPost.id}: +${delivery.successCount} sent, ${delivery.failureCount} failed, ${delivery.deliveredCount}/${subscribers.length} delivered.`
+        );
+      } else {
+        console.log('No new post.');
+      }
+    } else {
+      console.log('No new post.');
+    }
+
     state.lastCheckedAt = new Date().toISOString();
     saveJson(STATE_FILE, state);
-    console.log('No new post.');
     return state.latestPost;
   }
 
@@ -308,15 +404,10 @@ async function checkForNewPost() {
     const postWithTranslation = await enrichPostWithTranslation(post);
     latestTranslatedPost = postWithTranslation;
 
-    for (const chatId of subscribers) {
-      try {
-        await sendLatest(chatId, postWithTranslation);
-      } catch (error) {
-        console.error(`Failed to send message to ${chatId}:`, error.message);
-      }
-    }
-
-    console.log(`Sent new post ${post.id} to ${subscribers.length} chats.`);
+    const delivery = await deliverPostToSubscribers(postWithTranslation, subscribers);
+    console.log(
+      `Processed post ${post.id}: +${delivery.successCount} sent, ${delivery.failureCount} failed, ${delivery.deliveredCount}/${subscribers.length} delivered.`
+    );
   }
 
   state.lastSeenId = latestPost.id;
