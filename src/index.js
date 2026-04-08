@@ -18,6 +18,8 @@ const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_IDS || '6894522404')
 const POLL_INTERVAL_SECONDS = Number(process.env.POLL_INTERVAL_SECONDS || 60);
 const TELEGRAM_LONG_POLL_SECONDS = Number(process.env.TELEGRAM_LONG_POLL_SECONDS || 50);
 const RUN_MODE = process.env.RUN_MODE || (process.argv.includes('--daemon') ? 'daemon' : 'once');
+const RETRY_COOLDOWN_SECONDS = Number(process.env.RETRY_COOLDOWN_SECONDS || 600);
+const MAX_RETRY_ATTEMPTS_PER_POST = Number(process.env.MAX_RETRY_ATTEMPTS_PER_POST || 5);
 
 const ROOT = path.resolve(process.cwd());
 const DATA_DIR = path.join(ROOT, 'data');
@@ -197,9 +199,51 @@ function markDeliveryAttempt(deliveryState, post) {
       completed: false,
       lastAttemptAt: null,
       completedAt: null,
+      attemptCount: 0,
+      lastError: null,
     };
   }
+  deliveryState.posts[post.id].attemptCount = Number(deliveryState.posts[post.id].attemptCount || 0) + 1;
   deliveryState.posts[post.id].lastAttemptAt = new Date().toISOString();
+  deliveryState.posts[post.id].lastError = null;
+}
+
+function markDeliveryError(deliveryState, post, error) {
+  if (!deliveryState.posts) deliveryState.posts = {};
+  if (!deliveryState.posts[post.id]) {
+    deliveryState.posts[post.id] = {
+      link: post.link,
+      pubDate: post.pubDate,
+      deliveredChats: [],
+      completed: false,
+      lastAttemptAt: null,
+      completedAt: null,
+      attemptCount: 0,
+      lastError: null,
+    };
+  }
+  deliveryState.posts[post.id].lastError = error?.message || String(error || 'unknown error');
+}
+
+function shouldRetryPost(deliveryState, post, subscribers) {
+  const record = deliveryState?.posts?.[post.id];
+  if (!record) return true;
+  if (record.completed) return false;
+
+  const delivered = getDeliveredChatsForPost(deliveryState, post.id);
+  const allDelivered = subscribers.every((chatId) => delivered.has(Number(chatId)));
+  if (allDelivered) return false;
+
+  const attemptCount = Number(record.attemptCount || 0);
+  if (attemptCount >= MAX_RETRY_ATTEMPTS_PER_POST) return false;
+
+  const lastAttemptAt = record.lastAttemptAt ? Date.parse(record.lastAttemptAt) : null;
+  if (lastAttemptAt && Number.isFinite(lastAttemptAt)) {
+    const cooldownMs = RETRY_COOLDOWN_SECONDS * 1000;
+    if (Date.now() - lastAttemptAt < cooldownMs) return false;
+  }
+
+  return true;
 }
 
 function finalizeDeliveryIfComplete(deliveryState, post, subscribers) {
@@ -218,10 +262,25 @@ async function deliverPostToSubscribers(post, subscribers) {
   let successCount = 0;
   let failureCount = 0;
 
+  markDeliveryAttempt(deliveryState, post);
+  try {
+    saveDeliveryState(deliveryState);
+  } catch (error) {
+    markDeliveryError(deliveryState, post, error);
+    console.error(`Failed to persist delivery attempt for ${post.id}:`, error.message);
+    return {
+      successCount,
+      failureCount,
+      complete: false,
+      deliveredCount: deliveredBefore.size,
+      fatalStateError: true,
+      skipped: true,
+    };
+  }
+
   for (const chatId of subscribers) {
     if (deliveredBefore.has(Number(chatId))) continue;
 
-    markDeliveryAttempt(deliveryState, post);
     try {
       await sendLatest(chatId, post);
       markChatDelivered(deliveryState, post, chatId);
@@ -229,13 +288,38 @@ async function deliverPostToSubscribers(post, subscribers) {
       successCount += 1;
     } catch (error) {
       failureCount += 1;
+      markDeliveryError(deliveryState, post, error);
+      try {
+        saveDeliveryState(deliveryState);
+      } catch (saveError) {
+        console.error(`Failed to persist delivery failure for ${post.id}:`, saveError.message);
+        return {
+          successCount,
+          failureCount,
+          complete: false,
+          deliveredCount: getDeliveredChatsForPost(deliveryState, post.id).size,
+          fatalStateError: true,
+        };
+      }
       console.error(`Failed to send message to ${chatId}:`, error.message);
     }
   }
 
   const complete = finalizeDeliveryIfComplete(deliveryState, post, subscribers);
-  saveDeliveryState(deliveryState);
-  return { successCount, failureCount, complete, deliveredCount: getDeliveredChatsForPost(deliveryState, post.id).size };
+  try {
+    saveDeliveryState(deliveryState);
+  } catch (error) {
+    console.error(`Failed to finalize delivery state for ${post.id}:`, error.message);
+    return {
+      successCount,
+      failureCount,
+      complete: false,
+      deliveredCount: getDeliveredChatsForPost(deliveryState, post.id).size,
+      fatalStateError: true,
+    };
+  }
+
+  return { successCount, failureCount, complete, deliveredCount: getDeliveredChatsForPost(deliveryState, post.id).size, fatalStateError: false };
 }
 
 async function notifyAdmins(text) {
@@ -382,11 +466,18 @@ async function checkForNewPost() {
     }
 
     if (state.latestPost) {
-      const delivery = await deliverPostToSubscribers(state.latestPost, subscribers);
-      if (delivery.successCount || delivery.failureCount) {
-        console.log(
-          `Retried latest post ${state.latestPost.id}: +${delivery.successCount} sent, ${delivery.failureCount} failed, ${delivery.deliveredCount}/${subscribers.length} delivered.`
-        );
+      const deliveryState = loadDeliveryState();
+      if (shouldRetryPost(deliveryState, state.latestPost, subscribers)) {
+        const delivery = await deliverPostToSubscribers(state.latestPost, subscribers);
+        if (delivery.fatalStateError) {
+          console.error(`Retry for latest post ${state.latestPost.id} stopped due to state write failure.`);
+        } else if (delivery.successCount || delivery.failureCount) {
+          console.log(
+            `Retried latest post ${state.latestPost.id}: +${delivery.successCount} sent, ${delivery.failureCount} failed, ${delivery.deliveredCount}/${subscribers.length} delivered.`
+          );
+        } else {
+          console.log('No new post.');
+        }
       } else {
         console.log('No new post.');
       }
@@ -405,6 +496,10 @@ async function checkForNewPost() {
     latestTranslatedPost = postWithTranslation;
 
     const delivery = await deliverPostToSubscribers(postWithTranslation, subscribers);
+    if (delivery.fatalStateError) {
+      console.error(`Processed post ${post.id} but stopped due to delivery state write failure.`);
+      break;
+    }
     console.log(
       `Processed post ${post.id}: +${delivery.successCount} sent, ${delivery.failureCount} failed, ${delivery.deliveredCount}/${subscribers.length} delivered.`
     );
