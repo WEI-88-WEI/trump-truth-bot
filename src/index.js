@@ -108,6 +108,21 @@ function normalizeItems(rawItems) {
     .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 }
 
+function getStatusNumber(postOrId) {
+  const id = typeof postOrId === 'string' ? postOrId : postOrId?.id || postOrId?.link || '';
+  const match = String(id).match(/\/statuses\/(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function getNewestSeenPost(posts) {
+  return posts.reduce((newest, post) => {
+    const postNumber = getStatusNumber(post);
+    const newestNumber = getStatusNumber(newest);
+    if (postNumber !== null && (newestNumber === null || postNumber > newestNumber)) return post;
+    return newest || post;
+  }, null);
+}
+
 async function telegram(method, body = {}) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
     method: 'POST',
@@ -438,6 +453,7 @@ async function checkForNewPost() {
   const state = loadJson(STATE_FILE, { lastSeenId: null, lastCheckedAt: null, latestPost: null });
   const posts = await fetchLatestPosts();
   const latestPost = posts[posts.length - 1] || null;
+  const newestSeenPost = getNewestSeenPost(posts) || latestPost;
 
   if (!latestPost) {
     state.lastCheckedAt = new Date().toISOString();
@@ -449,7 +465,7 @@ async function checkForNewPost() {
 
   if (!state.lastSeenId) {
     const latestPostWithTranslation = await enrichPostWithTranslation(latestPost);
-    state.lastSeenId = latestPost.id;
+    state.lastSeenId = newestSeenPost.id;
     state.latestPost = latestPostWithTranslation;
     state.lastCheckedAt = new Date().toISOString();
     saveJson(STATE_FILE, state);
@@ -457,8 +473,16 @@ async function checkForNewPost() {
     return latestPostWithTranslation;
   }
 
-  const lastSeenIndex = posts.findIndex((post) => post.id === state.lastSeenId);
-  const newPosts = lastSeenIndex >= 0 ? posts.slice(lastSeenIndex + 1) : posts;
+  const lastSeenNumber = getStatusNumber(state.lastSeenId);
+  const newPosts = lastSeenNumber !== null
+    ? posts.filter((post) => {
+        const postNumber = getStatusNumber(post);
+        return postNumber !== null && postNumber > lastSeenNumber;
+      })
+    : (() => {
+        const lastSeenIndex = posts.findIndex((post) => post.id === state.lastSeenId);
+        return lastSeenIndex >= 0 ? posts.slice(lastSeenIndex + 1) : posts;
+      })();
 
   if (!newPosts.length) {
     if (!state.latestPost || state.latestPost.id !== latestPost.id) {
@@ -492,6 +516,12 @@ async function checkForNewPost() {
 
   let latestTranslatedPost = state.latestPost;
   for (const post of newPosts) {
+    const deliveryState = loadDeliveryState();
+    if (!shouldRetryPost(deliveryState, post, subscribers)) {
+      console.log(`Skipping already delivered post ${post.id}.`);
+      continue;
+    }
+
     const postWithTranslation = await enrichPostWithTranslation(post);
     latestTranslatedPost = postWithTranslation;
 
@@ -505,7 +535,7 @@ async function checkForNewPost() {
     );
   }
 
-  state.lastSeenId = latestPost.id;
+  state.lastSeenId = newestSeenPost.id;
   state.latestPost = latestTranslatedPost;
   state.lastCheckedAt = new Date().toISOString();
   saveJson(STATE_FILE, state);
